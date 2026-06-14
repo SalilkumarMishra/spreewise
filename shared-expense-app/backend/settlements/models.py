@@ -39,6 +39,15 @@ class Settlement(models.Model):
     source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default="manual")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
 
+    # Traceability: link back to the CSV import that created this settlement
+    import_job = models.ForeignKey(
+        "imports.ImportJob",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="imported_settlements"
+    )
+
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="created_settlements")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

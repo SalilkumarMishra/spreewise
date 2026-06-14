@@ -77,6 +77,15 @@ class Expense(models.Model):
     )
     notes = models.TextField(blank=True, null=True)
 
+    # Traceability: link back to the CSV import that created this expense
+    import_job = models.ForeignKey(
+        "imports.ImportJob",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="imported_expenses"
+    )
+
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
