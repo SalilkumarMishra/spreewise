@@ -1,77 +1,133 @@
-# DECISIONS
+# DECISIONS.md — Spreewise Architectural Decisions
 
-## Group and Membership Lifecycle Decisions (Priority 2)
+This document outlines the core architectural and design decisions made in Spreewise.
 
-### 1. Group Archiving vs Hard Deletion
-- **Decision**: Deleting a group through the API performs a soft delete (marking `is_archived = True`) instead of a physical SQL `DELETE`.
-- **Rationale**: Financial and expense histories must remain completely auditable for all group members, even if the group is no longer active. Deleting the group database records would break database cascades, leading to dangling/orphaned expenses or loss of historical ledger data.
+---
 
-### 2. Historical Membership Preservation (Soft-Departure)
-- **Decision**: Memberships are never hard deleted. Leaving a group changes the membership status to inactive (`is_active = False`) and records the exact date of departure in the `left_at` field.
-- **Rationale**: The core balance engine, CSV import parser, and expense distribution rules depend on membership state relative to dates (e.g. Meera leaves on March 31, Sam joins on April 15). Removing these records entirely would corrupt the history of who was active in the group when past expenses were logged.
+## 1. Historical Membership Preservation (A)
 
-### 3. Support for Multiple Lifetimes (Leave/Rejoin History)
-- **Decision**: Users are allowed to leave and rejoin the same group multiple times. This is implemented by maintaining a list of discrete membership records in the database, with a partial unique constraint allowing at most one *active* membership record per user per group at any given time.
-- **Rationale**: Enables auditability of non-contiguous memberships. A user can leave for a vacation or period, and rejoin later, creating two separate records to denote distinct active windows.
+### Problem
+In shared-living groups, members join and leave at various times (e.g., Meera leaves on March 31, Sam joins on April 15). If we only track active/inactive membership status, calculating balances and validating imports retrospectively becomes impossible. We need to know who was in the group on any specific past date.
 
-## Expense Management Architecture (Priority 3)
+### Options Considered
+1. **Simple Status Flag**: Add a boolean `is_active` to a flat user-group map. (Cannot track date intervals or historical periods).
+2. **Audit Logs / Event Stream**: Query system logs to reconstruct memberships. (Highly complex, slow, and error-prone database queries).
+3. **Date-Interval Membership Records**: Store active memberships with explicit `joined_at` and `left_at` fields, allowing a user to have multiple non-overlapping membership records. (Final Choice).
 
-### 4. Expense Snapshots and Immutability
-- **Decision**: Every creation and update to an Expense automatically generates an immutable `ExpenseSnapshot` record capturing the exact state of the expense, participants, and splits at that version.
-- **Rationale**: Expense histories need to be auditable. A change in a split amount today shouldn't obscure what was originally agreed upon yesterday. This snapshotting mechanism ensures complete transparency and aids in debugging balance mismatches or disputes without overwriting historical data.
+### Final Choice & Reasoning
+We implemented **Date-Interval Membership Records** using the `GroupMembership` model. This structure supports querying who was an active member on any past date (`is_member_on_date(user, check_date)`), keeping balance computations and historical CSV imports mathematically sound and auditable.
 
-### 5. Original Currency Preservation
-- **Decision**: The `Expense` model stores both `amount` / `currency` (the working values used for calculations) and `original_amount` / `original_currency` (the values originally input or imported).
-- **Rationale**: CSV imports often contain transactions in various currencies (e.g., USD expenses in an INR group). Preserving the original amounts guarantees that users can always trace back to the exact receipt amount ("Why does it say ₹44,928 when I spent $540?").
+---
 
-### 6. Expense Source and Status Fields
-- **Decision**: Added `source` (`manual`, `csv_import`, `system`) and `status` (`active`, `disputed`, `import_review`) fields with strict validation.
-- **Rationale**: Distinguishes between manual user entries, automated CSV imports, and system-generated settlements. The `status` field specifically enables anomaly workflows, where imported expenses can be parked under `import_review` or flagged as `disputed` before they affect active balances.
+## 2. Group Archiving vs Hard Deletion (B)
 
-### 7. Explainability Support
-- **Decision**: The system provides detailed breakdown helpers (`get_expense_breakdown`) and preserves exact split values (like `shares_value` and `percentage_value`).
-- **Rationale**: Financial systems must be able to answer "Why do I owe this amount?" Preserving the explicit logic (e.g., "Rohan owes ₹250 because he has 1 share out of 4 total shares") builds user trust and makes debugging significantly easier.
+### Problem
+If a group is deleted, what happens to the financial transactions logged in it? Bypassing database cascades by hard-deleting the group records breaks ledger audit trails, while keeping cascading rules deletes user transactions and corrupts individual financial statements.
 
-## Settlement Engine Architecture (Priority 4)
+### Options Considered
+1. **Hard Cascade Delete**: Delete groups and all related expenses, settlements, splits, and snapshots. (Violates financial data retention and audit requirements).
+2. **Dangling Foreign Keys (SET NULL)**: Delete groups but set the `group_id` foreign key on expenses and settlements to null. (Leaves orphan records and destroys context of which group the expenses belonged to).
+3. **Soft Delete (Archiving)**: Prevent physical deletions by setting `is_archived = True` on the group. (Final Choice).
 
-### 8. Settlements as Independent Entities
-- **Decision**: Settlements (payments between users) are modeled separately from Shared Expenses rather than being a specific `Expense` split type.
-- **Rationale**: While an expense represents an outbound cost shared by N people, a settlement represents an internal transfer from person A to person B to resolve debt. Separating them prevents convoluted `Expense` splits where `payer` = `receiver` with negative amounts, keeping the logic for the Balance Engine explicit and straightforward.
+### Final Choice & Reasoning
+We chose **Soft Delete (Archiving)**. The group remains in the database to support historical ledger queries and balance explanation traces, but is hidden from active operations.
 
-### 9. Reference ID Generation
-- **Decision**: Every settlement automatically generates a unique `reference_id` (e.g., `SET-2026-000001`).
-- **Rationale**: Makes UI traceability and debugging significantly easier. The Balance Engine and explainability logs can point to human-readable IDs ("Rohan's balance decreased due to SET-2026-000001").
+---
 
-### 10. Settlement Snapshots
-- **Decision**: Similar to Expenses, Settlements maintain immutable `SettlementSnapshot` versions. The snapshot payload stores the `reference_id` and all scalar values.
-- **Rationale**: If Aisha corrects a ₹500 settlement to ₹700, the change must be tracked to prevent disputes. The snapshot system ensures there is always a verifiable audit trail of changes over time.
+## 3. Expense Snapshots and Immutability (C)
 
-### 11. Balance Engine Generation (Events)
-- **Decision**: Instead of directly touching a ledger model, the Settlement service implements `generate_balance_event()`.
-- **Rationale**: This is a push-forward architectural choice. The upcoming Balance Engine will consume discrete immutable events (`+` or `-` amounts on a user's account) from both the Expense module and the Settlement module, establishing an event-sourced ledger capable of complete reconstruction at any point in time.
+### Problem
+Shared expenses can be edited (e.g., changing split shares or title). If we simply update the database row, we overwrite what was agreed upon in the past, making dispute resolution and balance audit impossible.
 
-### 12. Normalized Ledger Format
-- **Decision**: Introduced `generate_balance_ledger_entry()` to convert settlements into a normalized ledger structure (a list of zero-sum deltas).
-- **Rationale**: The Balance Engine should not need to understand the internal structure of every business object (Expenses, Settlements, Refunds, Adjustments). By normalizing these distinct entities into standard ledger entries (e.g. `[{user: payer, delta: -700}, {user: receiver, delta: 700}]`), the Balance Engine's responsibility is simplified to purely consuming and summing normalized deltas.
+### Options Considered
+1. **Fully Mutable Rows**: Overwrite fields directly. (Provides no audit trail or history of updates).
+2. **Normalized History Tables**: Mirror all model fields in a separate history table. (Increases complexity, duplicates database columns, and requires schema changes for both tables).
+3. **Immutable JSON Snapshots**: Save version-controlled JSON payloads capturing the exact state of expenses, participants, and splits on every insert/update. (Final Choice).
 
-## Balance Engine Architecture (Priority 5)
+### Final Choice & Reasoning
+We chose **Immutable JSON Snapshots** using the `ExpenseSnapshot` model. It separates live operational columns from audit records, is easy to serialize, and raises validation errors on any modify attempt, ensuring a perfect audit log.
 
-### 13. BalanceSnapshot Model
-- **Decision**: Introduced `BalanceSnapshot` to preserve JSON snapshots of the entire group's net balances at a specific point in time.
-- **Rationale**: Bulk operations like CSV imports change massive amounts of data at once. Having a point-in-time snapshot of what the balances were immediately after a major event assists heavily in rollback strategies, historical analysis, and auditing.
+---
 
-### 14. Zero-Sum Invariant Enforcement
-- **Decision**: Added a dedicated `validate_balance_invariants()` method that explicitly guarantees `sum(all_balances) == 0`.
-- **Rationale**: Floating point or decimal rounding errors can introduce "cent leakage". Explicitly validating invariants guarantees the absolute mathematical correctness of the system before exposing simplifications to the user.
+## 4. Settlements as Separate Entities (D)
 
-### 15. Debt Simplification Algorithm
-- **Decision**: Implemented a greedy algorithm that splits users into creditors and debtors and settles largest-to-largest debts first.
-- **Rationale**: This guarantees that money is not needlessly circular and provides the absolute fewest number of transactions required for a group to settle up, massively improving the user experience.
+### Problem
+Settlements (direct peer-to-peer payments) behave differently from expenses. An expense represents external costs split among N people, creating debt. A settlement represents an internal transfer from payer to receiver to reduce debt.
 
-### 16. Explanation Tracing
-- **Decision**: The API natively returns a `calculation_trace` array showing the running balance at every chronological step.
-- **Rationale**: Trust is everything in financial software. A user needs to be able to see line-by-line exactly how their balance reached its current state.
+### Options Considered
+1. **Shared Expense with Settlement Flag**: Log settlements as standard expenses using a special `settlement` split type and category. (Leads to complicated splits where the payer is credited and the receiver is debited, complicating the balance engine logic).
+2. **Decoupled Settlement Model**: Create an independent `Settlement` model with fields for `payer`, `receiver`, `reference_id`, and `payment_date`. (Final Choice).
 
-### 17. Balance Engine Invariant (Settlement Signs)
-- **Decision**: The normalized ledger sign convention dictates that Expenses *create* obligations (Payer gets `+`, Ower gets `-`) and Settlements *reduce* obligations (Debtor/Payer gets `+`, Creditor/Receiver gets `-`).
-- **Rationale**: A settlement event must always move balances closer to zero, not farther away. By keeping the logic identical in the event stream, the Balance Engine simply sums all historical deltas cleanly.
+### Final Choice & Reasoning
+We selected the **Decoupled Settlement Model**. This keeps both the split calculation code and the ledger balance engine clear. Expenses create obligations, whereas Settlements resolve them.
+
+---
+
+## 5. Normalized Ledger Format (E)
+
+### Problem
+The Balance Engine must ingest financial data from multiple sources (manual expenses, manual settlements, bulk imports). Having the engine understand the detailed schemas of every model creates high coupling and makes it difficult to add new event types (like refunds or adjustments).
+
+### Options Considered
+1. **Direct Model Queries**: Have the Balance Engine directly query both the `Expense` and `Settlement` models and compute obligations using model-specific properties. (Highly coupled, hard to maintain or expand).
+2. **Event-Sourced Ledger**: Map all transactions into a normalized ledger entry format: `{"event_type": ..., "reference_id": ..., "entries": [{"user_id": ..., "delta": ...}]}` where the sum of deltas is exactly zero. (Final Choice).
+
+### Final Choice & Reasoning
+We selected the **Normalized Ledger Format**. Both the Expense service and the Settlement service convert their states into a standard ledger record. The Balance Engine simply aggregates these events, reducing obligations calculation to summing numerical deltas.
+
+---
+
+## 6. Debt Simplification using Greedy Matching (F)
+
+### Problem
+If A owes B $10, and B owes C $10, direct settlements require two separate transactions. If there are many circular debts, users face an unnecessary volume of peer-to-peer transfers.
+
+### Options Considered
+1. **Direct Settlement**: Users settle debts directly with everyone they owe. (High transaction volume).
+2. **Greedy Debt Simplification**: Split users into Net Creditors and Net Debtors, sorting them by amount. Match the largest debtor with the largest creditor, reducing their obligations iteratively until all balances settle to zero. (Final Choice).
+
+### Final Choice & Reasoning
+We implemented **Greedy Debt Simplification**. It reduces transaction overhead to the minimum possible number of p2p transfers.
+
+---
+
+## 7. CSV Import Review Workflow (G)
+
+### Problem
+CSV data uploaded by users is often messy, containing duplicate rows, zero amounts, conversion mismatches, or settlements logged as expenses. Silently modifying, skipping, or auto-fixing rows breaks financial safety and audit trails.
+
+### Options Considered
+1. **Strict Reject**: Fail the entire import job on any anomaly. (Terrible user experience for large files).
+2. **Silent Drop/Fix**: Automatically drop duplicates or auto-convert currencies. (Violates financial safety).
+3. **Interactive Review Queue**: Process safe rows, flag anomalies in an anomaly table, pause the import job under a `review_required` status, and demand explicit user decisions (`approve`, `reject`, `ignore`) with reasons before resuming. (Final Choice).
+
+### Final Choice & Reasoning
+We built the **Interactive Review Queue** using the `ImportAnomaly` and `ImportDecision` models. This guarantees complete audit trace and gives the user control to resolve ambiguous rows manually.
+
+---
+
+## 8. Original Currency Preservation (H)
+
+### Problem
+Imports may contain expenses in non-group currencies (e.g., a USD receipt in an INR group). If we only store the converted amount, users cannot verify the transaction against their receipts.
+
+### Options Considered
+1. **Store Converted Only**: Convert foreign amounts immediately and store only the converted amount. (Deletes the receipt trace).
+2. **Dual-Currency Storage**: Store the converted `amount`/`currency` for balance calculations and the `original_amount`/`original_currency` for explainability. (Final Choice).
+
+### Final Choice & Reasoning
+We chose **Dual-Currency Storage** on both `Expense` and `Settlement` models. This allows users to reconcile their transactions with original receipts.
+
+---
+
+## 9. Balance Snapshots (I)
+
+### Problem
+Reconstructing balances from historical ledger records can become slow as the volume of events grows. We need an audit capture of obligations at key points in time (e.g., right after a massive CSV import).
+
+### Options Considered
+1. **Dynamic ledger scanning**: Scan and sum all deltas on every query. (Computations become slower as database rows grow).
+2. **Balance Snapshotting**: Save a point-in-time JSON snapshot of all net balances in the database. (Final Choice).
+
+### Final Choice & Reasoning
+We selected **Balance Snapshotting** via `BalanceSnapshot`. We trigger it automatically at the end of bulk imports, preserving an immutable trace of balances.

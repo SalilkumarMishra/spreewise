@@ -14,6 +14,7 @@ The system supports:
 - A normalized Balance Engine that calculates net obligations from all events
 - A CSV Import Engine that ingests historical data with full anomaly detection
 - Immutable audit snapshots on every financial record
+- Anomaly review decision audit history tracking
 
 ---
 
@@ -30,154 +31,298 @@ The system supports:
 
 ---
 
-## 3. Business Rules
+## 3. Database Schema
 
-### 3.1 Group & Membership
-- Groups are never permanently deleted — they are archived (`is_archived=True`).
-- Group membership tracks `joined_at` and `left_at` dates.
-- The `is_member_on_date(user, date)` method is the single authoritative check for membership eligibility.
-- A user can rejoin a group after leaving.
+The database consists of the following Django models:
 
-### 3.2 Expenses
-- Every expense records both `amount/currency` (in group currency, post-conversion) and `original_amount/original_currency` (as entered, for auditability).
-- Every expense creation or update generates an immutable `ExpenseSnapshot` (version-controlled JSON).
-- Split types: `equal`, `percentage`, `shares`, `exact`.
-- Remainder from rounding is always assigned to the **first participant**.
-- Expenses can have status: `active`, `disputed`, `import_review`.
-- Source: `manual`, `csv_import`, `system`.
+### 3.1 Group (`groups.Group`)
+Represents an expense group.
+- `id` (Auto-increment Primary Key)
+- `name` (CharField, max_length=255)
+- `description` (TextField, optional)
+- `currency` (CharField, max_length=10, default="INR")
+- `is_archived` (BooleanField, default=False)
+- `created_by` (ForeignKey to Django User, on_delete=PROTECT)
+- `created_at` (DateTimeField, auto_now_add=True)
+- `updated_at` (DateTimeField, auto_now=True)
 
-### 3.3 Settlements
-- Settlements are modelled separately from Expenses (a `Settlement` moves `amount` from `payer` to `receiver`).
-- Every settlement has a unique `reference_id` (e.g. `SET-2026-000001`).
-- Every settlement generates an immutable `SettlementSnapshot`.
-- Settlement sign convention: **Settlements reduce debt** — the payer's balance moves toward zero, the receiver's balance moves toward zero.
+### 3.2 GroupMembership (`groups.GroupMembership`)
+Tracks users' non-contiguous active windows in a group.
+- `id` (Auto-increment Primary Key)
+- `group` (ForeignKey to Group, on_delete=CASCADE)
+- `user` (ForeignKey to Django User, on_delete=PROTECT)
+- `joined_at` (DateField)
+- `left_at` (DateField, optional)
+- `is_active` (BooleanField, default=True)
+- `role` (CharField choices: owner, admin, member)
+- `created_at` (DateTimeField, auto_now_add=True)
+- *Constraints*: Unique active membership per user per group (`unique_active_group_membership`).
 
-### 3.4 Balance Engine
-- The Balance Engine consumes **normalized ledger entries** (`{user_id, delta}` arrays that always sum to zero) from both Expenses and Settlements.
-- `sum(all_group_balances) == 0` is a hard invariant enforced by `validate_balance_invariants()`.
-- Debt simplification uses a greedy algorithm (largest creditor matched with largest debtor) to generate minimum payment instructions.
-- Every balance recalculation produces a `BalanceSnapshot` for historical audit.
+### 3.3 Expense (`expenses.Expense`)
+Represents a financial expense shared among members.
+- `id` (Auto-increment Primary Key)
+- `group` (ForeignKey to Group, on_delete=PROTECT)
+- `title` (CharField, max_length=255)
+- `description` (TextField, optional)
+- `amount` (DecimalField, max_digits=14, decimal_places=2)
+- `currency` (CharField, max_length=10, default="INR")
+- `original_amount` (DecimalField, max_digits=14, decimal_places=2)
+- `original_currency` (CharField, max_length=10, default="INR")
+- `expense_category` (CharField choices: food, rent, utilities, travel, groceries, entertainment, settlement, refund, general)
+- `source` (CharField choices: manual, csv_import, system)
+- `expense_date` (DateField)
+- `paid_by` (ForeignKey to Django User, on_delete=PROTECT)
+- `split_type` (CharField choices: equal, percentage, shares, exact)
+- `status` (CharField choices: active, disputed, import_review)
+- `notes` (TextField, optional)
+- `import_job` (ForeignKey to ImportJob, on_delete=SET_NULL, optional)
+- `created_by` (ForeignKey to Django User, on_delete=PROTECT)
+- `created_at` (DateTimeField, auto_now_add=True)
+- `updated_at` (DateTimeField, auto_now=True)
+- `is_archived` (BooleanField, default=False)
+
+### 3.4 ExpenseParticipant (`expenses.ExpenseParticipant`)
+Tracks who was charged for a specific expense.
+- `id` (Auto-increment Primary Key)
+- `expense` (ForeignKey to Expense, on_delete=CASCADE)
+- `user` (ForeignKey to Django User, on_delete=PROTECT)
+- *Constraints*: Unique user-expense combination.
+
+### 3.5 ExpenseSplit (`expenses.ExpenseSplit`)
+Stores calculated and original split rules per participant.
+- `id` (Auto-increment Primary Key)
+- `expense` (ForeignKey to Expense, on_delete=CASCADE)
+- `user` (ForeignKey to Django User, on_delete=PROTECT)
+- `percentage_value` (DecimalField, optional)
+- `shares_value` (DecimalField, optional)
+- `exact_amount` (DecimalField, optional)
+- `calculated_amount` (DecimalField, max_digits=14, decimal_places=2)
+- *Constraints*: Unique user-expense combination.
+
+### 3.6 ExpenseSnapshot (`expenses.ExpenseSnapshot`)
+Stores immutable versions of expenses for audits.
+- `id` (Auto-increment Primary Key)
+- `expense` (ForeignKey to Expense, on_delete=CASCADE)
+- `version` (IntegerField)
+- `payload_json` (JSONField)
+- `created_at` (DateTimeField, auto_now_add=True)
+- *Constraints*: Unique combination of expense and version.
+
+### 3.7 Settlement (`settlements.Settlement`)
+Represents an direct p2p payment reducing debt.
+- `id` (Auto-increment Primary Key)
+- `reference_id` (CharField, max_length=50, unique=True)
+- `group` (ForeignKey to Group, on_delete=PROTECT)
+- `payer` (ForeignKey to Django User, on_delete=PROTECT)
+- `receiver` (ForeignKey to Django User, on_delete=PROTECT)
+- `amount` (DecimalField, max_digits=14, decimal_places=2)
+- `currency` (CharField, max_length=10, default="INR")
+- `original_amount` (DecimalField, max_digits=14, decimal_places=2)
+- `original_currency` (CharField, max_length=10, default="INR")
+- `payment_date` (DateField)
+- `notes` (TextField, optional)
+- `settlement_category` (CharField choices: direct_payment, bank_transfer, cash, upi, imported)
+- `source` (CharField choices: manual, csv_import, system)
+- `status` (CharField choices: active, disputed, import_review)
+- `import_job` (ForeignKey to ImportJob, on_delete=SET_NULL, optional)
+- `created_by` (ForeignKey to Django User, on_delete=PROTECT)
+- `created_at` (DateTimeField, auto_now_add=True)
+- `updated_at` (DateTimeField, auto_now=True)
+- `is_archived` (BooleanField, default=False)
+
+### 3.8 SettlementSnapshot (`settlements.SettlementSnapshot`)
+Tracks immutable historical versions of settlements.
+- `id` (Auto-increment Primary Key)
+- `settlement` (ForeignKey to Settlement, on_delete=CASCADE)
+- `version` (IntegerField)
+- `payload_json` (JSONField)
+- `created_at` (DateTimeField, auto_now_add=True)
+- *Constraints*: Unique combination of settlement and version.
+
+### 3.9 BalanceSnapshot (`balance_engine.BalanceSnapshot`)
+Preserves group net balances at specific snapshots.
+- `id` (Auto-increment Primary Key)
+- `group` (ForeignKey to Group, on_delete=CASCADE)
+- `snapshot_date` (DateTimeField, auto_now_add=True)
+- `payload_json` (JSONField)
+- `created_at` (DateTimeField, auto_now_add=True)
+
+### 3.10 ImportJob (`imports.ImportJob`)
+Manages bulk CSV file imports.
+- `id` (Auto-increment Primary Key)
+- `group` (ForeignKey to Group, on_delete=CASCADE, optional)
+- `uploaded_by` (ForeignKey to Django User, on_delete=SET_NULL, optional)
+- `original_filename` (CharField, max_length=255)
+- `status` (CharField choices: pending, processing, review_required, completed, failed)
+- `created_at` (DateTimeField, auto_now_add=True)
+- `completed_at` (DateTimeField, optional)
+
+### 3.11 ImportRow (`imports.ImportRow`)
+Preserves details of individual CSV rows.
+- `id` (Auto-increment Primary Key)
+- `import_job` (ForeignKey to ImportJob, on_delete=CASCADE)
+- `row_number` (IntegerField)
+- `raw_data` (JSONField)
+- `parsed_data` (JSONField, optional)
+- `processing_status` (CharField choices: pending, imported, skipped, review_required, failed)
+
+### 3.12 ImportAnomaly (`imports.ImportAnomaly`)
+Represents an anomaly flagged on a row.
+- `id` (Auto-increment Primary Key)
+- `import_job` (ForeignKey to ImportJob, on_delete=CASCADE)
+- `import_row` (ForeignKey to ImportRow, on_delete=CASCADE)
+- `anomaly_type` (CharField, max_length=50)
+- `anomaly_category` (CharField choices: duplicate, membership, currency, date, settlement, split, validation, unknown_user)
+- `severity` (CharField choices: low, medium, high, critical)
+- `description` (TextField)
+- `detected_action` (CharField)
+- `user_decision` (CharField, choices: approve, reject, ignore, optional)
+- `created_at` (DateTimeField, auto_now_add=True)
+
+### 3.13 ImportDecision (`imports.ImportDecision`)
+Logs the audit trace of users review decisions.
+- `id` (Auto-increment Primary Key)
+- `anomaly` (OneToOneField to ImportAnomaly)
+- `decision` (CharField choices: approve, reject, ignore)
+- `decided_by` (ForeignKey to Django User, on_delete=SET_NULL, optional)
+- `decision_reason` (TextField, optional)
+- `created_at` (DateTimeField, auto_now_add=True)
+
+### 3.14 ImportReport (`imports.ImportReport`)
+Summary details of an completed/paused ImportJob.
+- `id` (Auto-increment Primary Key)
+- `import_job` (OneToOneField to ImportJob)
+- `total_rows` (IntegerField, default=0)
+- `imported_rows` (IntegerField, default=0)
+- `skipped_rows` (IntegerField, default=0)
+- `failed_rows` (IntegerField, default=0)
+- `anomaly_count` (IntegerField, default=0)
+- `report_json` (JSONField)
 
 ---
 
 ## 4. CSV Import Engine — Anomaly Detection Catalogue
 
-The import engine never silently modifies or discards data. Every anomaly generates an `ImportAnomaly` record with a policy and leaves an audit trail.
+Every anomaly rule flags a record in `ImportAnomaly` and operates under one of three policies:
+- `REJECT`: Blocks processing. Row cannot be imported.
+- `REVIEW_REQUIRED`: Pauses import. Demands user intervention.
+- `AUTO_FIX`: System corrects the issue automatically.
 
-### Anomaly Policies
+### Implemented Anomaly Rules
 
-| Policy | Meaning |
-|---|---|
-| `REJECT` | Row is immediately failed. No import. |
-| `REVIEW_REQUIRED` | Human must explicitly approve or reject before row is processed. |
-| `AUTO_FIX` | Engine resolves automatically (reserved for future use). |
+#### A. Duplicate Expense
+- **Anomaly Name**: `duplicate_expense`
+- **Detection Logic**: Checks if an expense with the exact same description/title, amount, currency, payer, and expense_date already exists in the group (excluding archived ones).
+- **Severity**: High
+- **Policy**: `REVIEW_REQUIRED`
 
-### Anomaly Rules
+#### B. Duplicate Settlement
+- **Anomaly Name**: `duplicate_settlement`
+- **Detection Logic**: Checks if a settlement with the exact same payer, receiver, amount, currency, and payment_date already exists in the group (excluding archived ones).
+- **Severity**: High
+- **Policy**: `REVIEW_REQUIRED`
 
-| ID | Anomaly Type | Category | Severity | Policy | Description |
-|---|---|---|---|---|---|
-| A | `duplicate_expense` | `duplicate` | High | `REVIEW_REQUIRED` | Same title, date, payer, and amount already exists in the group. |
-| B | `duplicate_settlement` | `duplicate` | High | `REVIEW_REQUIRED` | Same payer, receiver, date, and amount settlement already recorded. |
-| C | `negative_amount` | `validation` | High | `REJECT` | Financial amounts must be positive. Negative values are rejected. |
-| D | `zero_amount` | `validation` | Medium | `REVIEW_REQUIRED` | Zero-amount rows are likely placeholders or errors. |
-| E | `unknown_user` | `unknown_user` | Critical | `REJECT` | Payer or participant username does not exist in the system. |
-| F | `invalid_date` | `date` | High | `REJECT` | Date field is missing or uses an unrecognised format. |
-| G | `unsupported_currency` | `currency` | High | `REJECT` | Currency code is not in the supported set (INR, USD, EUR, GBP). |
-| H | `missing_required_fields` | `validation` | High | `REJECT` | One or more required columns are missing or unparseable. |
-| I | `payer_not_active_on_date` / `participant_not_active_on_date` | `membership` | High | `REJECT` | User was not an active group member on the expense/payment date (validated via `is_member_on_date()`). |
-| J | `settlement_logged_as_expense` | `settlement` | High | `REVIEW_REQUIRED` | Row description contains settlement keywords (e.g. "paid back", "reimbursement", "settled"). Must be classified by human reviewer. |
-| K | `currency_conversion_required` | `currency` | Medium | `REVIEW_REQUIRED` | Row currency differs from group currency (e.g. USD row in INR group). Manual conversion review required. |
-| L | `split_validation_failure` | `split` | High | `REJECT` | Non-equal split type was specified but no `splits_data` was provided. |
+#### C. Negative Amount
+- **Anomaly Name**: `negative_amount`
+- **Detection Logic**: Flags if the parsed financial amount is less than `0.00`.
+- **Severity**: High
+- **Policy**: `REJECT`
 
-### Settlement Keyword Detection
-The following description keywords trigger anomaly J (`settlement_logged_as_expense`):
-`paid back`, `reimbursement`, `reimburse`, `payback`, `pay back`, `settled`, `settlement`, `transfer`, `repaid`, `repay`
+#### D. Zero Amount
+- **Anomaly Name**: `zero_amount`
+- **Detection Logic**: Flags if the parsed financial amount is exactly `0.00`.
+- **Severity**: Medium
+- **Policy**: `REVIEW_REQUIRED`
 
----
+#### E.1 Unknown Payer
+- **Anomaly Name**: `unknown_user`
+- **Detection Logic**: The username provided in the `payer` field does not exist in the database.
+- **Severity**: Critical
+- **Policy**: `REJECT`
 
-## 5. CSV Import Review Workflow (Meera's Requirement)
+#### E.2 Unknown Participant
+- **Anomaly Name**: `unknown_participant`
+- **Detection Logic**: One or more usernames listed in the `participants` column do not exist in the database.
+- **Severity**: Critical
+- **Policy**: `REJECT`
 
-1. User uploads a CSV file via `POST /api/imports/upload/`.
-2. The pipeline parses all rows and detects anomalies.
-3. If any row has a `REVIEW_REQUIRED` anomaly, the `ImportJob` status is set to `review_required` and processing pauses.
-4. User reviews anomalies via `GET /api/imports/{id}/anomalies/`.
-5. User submits a decision for each anomaly via `POST /api/imports/anomalies/{id}/decision/`.
-6. Decision choices: `approve`, `reject`, `ignore`.
-7. Each decision is recorded as an immutable `ImportDecision` record (with `decided_by`, `decision_reason`, and timestamp).
-8. Once all `REVIEW_REQUIRED` anomalies are decided, the pipeline resumes and processes approved rows.
-9. A final `ImportReport` is generated with a full anomaly breakdown.
+#### F. Invalid Date
+- **Anomaly Name**: `invalid_date`
+- **Detection Logic**: The date field is empty, malformed, or doesn't match standard formats (`YYYY-MM-DD`, `DD/MM/YYYY`, `MM/DD/YYYY`, `DD-MM-YYYY`, `YYYY/MM/DD`).
+- **Severity**: High
+- **Policy**: `REJECT`
 
-**Rule: No data is ever silently modified or deleted. Every action has an audit trail.**
+#### G. Unsupported Currency
+- **Anomaly Name**: `unsupported_currency`
+- **Detection Logic**: The currency code is not in the supported list: `{"INR", "USD", "EUR", "GBP"}`.
+- **Severity**: High
+- **Policy**: `REJECT`
 
----
+#### H.1 Missing Required Fields
+- **Anomaly Name**: `missing_required_fields`
+- **Detection Logic**: One or more required CSV columns (`date`, `description`, `payer`, `amount`, `currency`, `participants`, `split_type`) are missing or unparseable.
+- **Severity**: High
+- **Policy**: `REJECT`
 
-## 6. API Endpoints
+#### H.2 Missing Payer
+- **Anomaly Name**: `missing_payer`
+- **Detection Logic**: The `payer` field is blank or missing.
+- **Severity**: Critical
+- **Policy**: `REJECT`
 
-### Groups
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/groups/` | Create group |
-| GET | `/api/groups/` | List groups |
-| GET | `/api/groups/{id}/` | Get group detail |
-| POST | `/api/groups/{id}/members/` | Add member |
-| POST | `/api/groups/{id}/leave/` | Leave group |
+#### I.1 Payer Not Active on Date
+- **Anomaly Name**: `payer_not_active_on_date`
+- **Detection Logic**: The payer was not an active group member on the expense date (validated using `is_member_on_date()`).
+- **Severity**: High
+- **Policy**: `REJECT`
 
-### Expenses
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/expenses/` | Create expense |
-| GET | `/api/expenses/` | List expenses |
-| GET | `/api/expenses/{id}/` | Expense detail |
-| PUT | `/api/expenses/{id}/` | Update expense |
-| DELETE | `/api/expenses/{id}/` | Soft-delete expense |
+#### I.2 Participant Not Active on Date
+- **Anomaly Name**: `participant_not_active_on_date`
+- **Detection Logic**: One or more participants were not active group members on the expense date (validated using `is_member_on_date()`).
+- **Severity**: High
+- **Policy**: `REJECT`
 
-### Settlements
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/settlements/` | Record settlement |
-| GET | `/api/settlements/` | List settlements |
-| GET | `/api/settlements/{id}/` | Settlement detail |
-| PUT | `/api/settlements/{id}/` | Update settlement |
-| DELETE | `/api/settlements/{id}/` | Soft-delete settlement |
+#### J. Settlement Logged as Expense
+- **Anomaly Name**: `settlement_logged_as_expense`
+- **Detection Logic**: The expense description contains one or more settlement keywords: `paid back`, `reimbursement`, `reimburse`, `payback`, `pay back`, `settled`, `settlement`, `transfer`, `repaid`, `repay`.
+- **Severity**: High
+- **Policy**: `REVIEW_REQUIRED`
 
-### Balance Engine
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/balances/groups/{id}/` | Group balance summary |
-| GET | `/api/balances/groups/{id}/simplified/` | Simplified payback instructions |
-| GET | `/api/balances/groups/{id}/users/{uid}/` | User balance explanation |
-| GET | `/api/balances/groups/{id}/ledger/` | Raw chronological ledger |
+#### K. Currency Conversion Required
+- **Anomaly Name**: `currency_conversion_required`
+- **Detection Logic**: The currency of the row differs from the default currency configured for the group.
+- **Severity**: Medium
+- **Policy**: `REVIEW_REQUIRED`
 
-### CSV Import
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/imports/upload/` | Upload CSV file |
-| GET | `/api/imports/` | List import jobs |
-| GET | `/api/imports/{id}/` | Import job detail |
-| GET | `/api/imports/{id}/anomalies/` | List anomalies |
-| POST | `/api/imports/anomalies/{id}/decision/` | Submit anomaly decision |
-| GET | `/api/imports/{id}/report/` | Final import report |
-
----
-
-## 7. Data Integrity Guarantees
-
-1. **No hard deletes** — All records support soft-delete via `is_archived`.
-2. **Immutable snapshots** — `ExpenseSnapshot` and `SettlementSnapshot` raise `ValidationError` on any update attempt.
-3. **Zero-sum invariant** — Every ledger event (expense or settlement) must produce entries that sum to exactly zero.
-4. **Membership date validation** — Every financial event validates all participants were active members on the event date.
-5. **Audit trail** — Every `ImportDecision` preserves who made a decision, when, and why.
-6. **Import traceability** — Every `Expense` and `Settlement` created via CSV import carries a `import_job` FK pointing back to the `ImportJob`.
+#### L. Split Validation Failure
+- **Anomaly Name**: `split_validation_failure`
+- **Detection Logic**: Split type is non-equal (`percentage`, `shares`, `exact`) but the `splits_data` column is blank or unparseable.
+- **Severity**: High
+- **Policy**: `REJECT`
 
 ---
 
-## 8. Technology Stack
+## 5. Import Pipeline
 
-| Layer | Technology |
-|---|---|
-| Language | Python 3.13 |
-| Framework | Django 6.x |
-| API | Django REST Framework |
-| Database | PostgreSQL |
-| Auth | Django built-in + Session/Basic auth |
-| Migrations | Django ORM migrations |
+The import processing workflow operates as follows:
+
+```mermaid
+graph TD
+    A[Upload CSV File] --> B[CSV Parser]
+    B -->|Parse Columns & Rows| C[Anomaly Detector]
+    C -->|Detects REJECT Anomalies| D[Mark Row Failed]
+    C -->|Detects REVIEW_REQUIRED Anomalies| E[Mark Row Review Required & Pause Job]
+    E --> F[User Submits Decision via API]
+    F -->|Approve| G[Mark Row Pending]
+    F -->|Reject / Ignore| H[Mark Row Skipped]
+    C -->|No Anomalies| G
+    G --> I[Expense & Settlement Services]
+    I -->|Create Records & Link to ImportJob| J[Balance Engine Recalculation]
+    J --> K[Generate Import Report]
+```
+
+1. **Parser**: Normalizes CSV headers, parses fields into types, and identifies formatting errors.
+2. **Anomaly Detector**: Scans rows for rules A–L.
+3. **Review Workflow**: If `REVIEW_REQUIRED` anomalies exist, the job changes to `review_required` and stops. Decisions must be posted to `/api/imports/anomalies/{id}/decision/`.
+4. **Execution**: Safe rows (and approved rows) are processed. Expense or Settlement objects are generated via transaction-safe service layers.
+5. **Ledger & Balances**: Post-import completion triggers balance recalculation.
