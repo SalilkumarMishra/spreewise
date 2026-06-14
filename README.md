@@ -371,3 +371,191 @@ spreewise/
 ├── AI_USAGE.md
 └── TESTING_GUIDE.md
 ```
+
+## Demo Environment & Interview Walkthrough
+
+### Demo Login Credentials
+
+All demo accounts use the same password:
+
+```text
+Password: Demo@123
+```
+
+| Username | Role |
+| -------- | ---- |
+| aisha    | Group Owner |
+| rohan    | Member |
+| priya    | Member |
+| meera    | Former Member |
+| sam      | New Member |
+| dev      | Temporary Trip Member |
+
+---
+
+### Demo Group
+
+```text
+Flatmates Shared Expenses
+```
+
+Currency:
+
+```text
+INR
+```
+
+The group contains historical membership changes that demonstrate membership‑aware expense tracking.
+
+---
+
+### Membership Timeline
+
+#### Aisha
+
+Joined:
+2026-02-01
+
+Status:
+Active
+
+---
+
+#### Rohan
+
+Joined:
+2026-02-01
+
+Status:
+Active
+
+---
+
+#### Priya
+
+Joined:
+2026-02-01
+
+Status:
+Active
+
+---
+
+#### Meera
+
+Joined:
+2026-02-01
+
+Left:
+2026-03-31
+
+Status:
+Inactive
+
+---
+
+#### Sam
+
+Joined:
+2026-04-15
+
+Status:
+Active
+
+---
+
+#### Dev
+
+Joined:
+2026-02-08
+
+Left:
+2026-03-15
+
+Purpose:
+Temporary Goa Trip Member
+
+---
+
+### Included Demo Scenarios
+
+The demo dataset intentionally covers every major feature of the platform.
+
+#### Expenses
+
+Examples include:
+
+* Equal split expenses
+* Percentage split expenses
+* Shares‑based expenses
+* Exact amount expenses
+* USD‑origin expenses with preserved original currency
+* Membership‑aware expense validation
+
+#### Settlements
+
+Examples include:
+
+* Rohan → Aisha repayment
+* Priya → Rohan repayment
+* Sam → Aisha repayment
+
+#### Balance Engine
+
+Examples include:
+
+* Net balance computation
+* User balance explanations
+* Debt simplification recommendations
+* Zero‑sum balance verification
+
+#### CSV Import Engine
+
+A sample import job is available containing realistic anomalies:
+
+* Duplicate Expense
+* Unknown User
+* Membership Violation
+* Date Ambiguity
+* Settlement Logged As Expense
+* Currency Conversion Review
+
+This allows reviewers to test the anomaly review workflow without uploading new files.
+
+---
+
+### Suggested Interview Walkthrough
+
+Reviewers can validate the system using the following flow:
+
+1. Login as **Aisha**.
+2. Open the **Flatmates Shared Expenses** group.
+3. Review historical memberships.
+4. Create a new expense.
+5. Create a settlement.
+6. View simplified debts.
+7. Open the Balance Explanation view.
+8. Review CSV Import anomalies.
+9. Approve or reject anomaly decisions.
+10. Verify balances are recalculated correctly.
+
+---
+
+### What This Demonstrates
+
+The demo environment exercises:
+
+* Authentication
+* Authorization
+* Group Management
+* Membership Lifecycle
+* Expense Engine
+* Settlement Engine
+* Balance Engine
+* Debt Simplification
+* CSV Import Processing
+* Anomaly Detection
+* Review Workflow
+* Explainability Features
+
+This provides a complete end‑to‑end demonstration of the Spreewise platform without requiring any additional setup.
