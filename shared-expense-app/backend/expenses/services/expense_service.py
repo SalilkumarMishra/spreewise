@@ -437,3 +437,135 @@ def update_expense(
     ExpenseSnapshot.objects.create(expense=expense, version=new_version, payload_json=payload)
 
     return expense
+
+
+# ---------------------------------------------------------------------------
+# Balance Engine Preparation & Explainability Helpers
+# ---------------------------------------------------------------------------
+
+def calculate_user_net_position(expense):
+    """
+    For a given expense, calculate each participant's net position.
+    Returns a dict mapping user_id to:
+        {
+            "user": User,
+            "amount_paid": Decimal,
+            "amount_owed": Decimal,
+            "net_amount": Decimal
+        }
+    """
+    positions = {}
+    
+    # Initialize all participants
+    for participant in expense.participants.all():
+        positions[participant.user_id] = {
+            "user": participant.user,
+            "amount_paid": Decimal("0.00"),
+            "amount_owed": Decimal("0.00"),
+            "net_amount": Decimal("0.00"),
+        }
+    
+    # If the payer is not a participant (edge case), initialize them too
+    if expense.paid_by_id not in positions:
+        positions[expense.paid_by_id] = {
+            "user": expense.paid_by,
+            "amount_paid": Decimal("0.00"),
+            "amount_owed": Decimal("0.00"),
+            "net_amount": Decimal("0.00"),
+        }
+        
+    # Record what was paid
+    positions[expense.paid_by_id]["amount_paid"] = expense.amount
+    
+    # Record what is owed based on splits
+    for split in expense.splits.all():
+        positions[split.user_id]["amount_owed"] = split.calculated_amount
+        
+    # Calculate net
+    for pos in positions.values():
+        pos["net_amount"] = pos["amount_paid"] - pos["amount_owed"]
+        
+    return positions
+
+def generate_balance_ledger_entry(expense):
+    """
+    Returns the normalized ledger format for the Balance Engine.
+    """
+    positions = calculate_user_net_position(expense)
+    entries = []
+    for user_id, pos in positions.items():
+        if pos["net_amount"] != Decimal("0.00"):
+            entries.append({
+                "user_id": user_id,
+                "delta": pos["net_amount"]
+            })
+            
+    return {
+        "event_type": "expense",
+        "reference_id": f"EXP-{expense.id}",
+        "event_date": str(expense.expense_date),
+        "entries": entries
+    }
+
+
+
+def get_expense_breakdown(expense):
+    """
+    Return a detailed, human-readable breakdown of an expense to support explainability.
+    """
+    splits_data = []
+    for split in expense.splits.all():
+        splits_data.append({
+            "user_id": split.user_id,
+            "username": split.user.username,
+            "calculated_amount": str(split.calculated_amount),
+            "percentage_value": str(split.percentage_value) if split.percentage_value else None,
+            "shares_value": str(split.shares_value) if split.shares_value else None,
+            "exact_amount": str(split.exact_amount) if split.exact_amount else None,
+        })
+        
+    return {
+        "expense_id": expense.id,
+        "title": expense.title,
+        "amount": str(expense.amount),
+        "currency": expense.currency,
+        "split_type": expense.split_type,
+        "paid_by": expense.paid_by.username,
+        "participants": [p.user.username for p in expense.participants.all()],
+        "splits": splits_data
+    }
+
+
+# ---------------------------------------------------------------------------
+# Import Compatibility Check
+# ---------------------------------------------------------------------------
+
+def expense_can_be_imported(payload):
+    """
+    Validate if a raw payload (from CSV/external) can be imported.
+    Returns (is_valid, list_of_error_messages).
+    """
+    errors = []
+    
+    amount = payload.get("amount")
+    if amount is None or Decimal(str(amount)) <= 0:
+        errors.append("Invalid or missing amount.")
+        
+    split_type = payload.get("split_type")
+    if split_type not in [c[0] for c in Expense.SPLIT_TYPE_CHOICES]:
+        errors.append(f"Invalid split_type '{split_type}'.")
+        
+    participants = payload.get("participant_ids", [])
+    if not participants:
+        errors.append("No participants provided.")
+        
+    expense_date = payload.get("expense_date")
+    if not expense_date:
+        errors.append("Missing expense_date.")
+        
+    category = payload.get("expense_category")
+    if category and category not in [c[0] for c in Expense.CATEGORY_CHOICES]:
+        errors.append(f"Invalid category '{category}'.")
+        
+    return len(errors) == 0, errors
+

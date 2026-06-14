@@ -94,6 +94,34 @@ class Expense(models.Model):
         self.is_archived = True
         self.save()
 
+    # ------------------------------------------------------------------
+    # Audit helper methods — used by Balance Engine, CSV Import, etc.
+    # ------------------------------------------------------------------
+
+    def is_imported(self):
+        """Return True if this expense was created via CSV import."""
+        return self.source == "csv_import"
+
+    def is_manual(self):
+        """Return True if this expense was manually entered by a user."""
+        return self.source == "manual"
+
+    def is_under_review(self):
+        """Return True if this expense is pending import review."""
+        return self.status == "import_review"
+
+    def is_disputed(self):
+        """Return True if this expense is flagged as disputed."""
+        return self.status == "disputed"
+
+    def get_latest_snapshot(self):
+        """Return the most recent ExpenseSnapshot for this expense."""
+        return self.snapshots.order_by("-version").first()
+
+    def get_snapshot_history(self):
+        """Return all ExpenseSnapshots ordered from oldest to newest."""
+        return self.snapshots.order_by("version")
+
     def __str__(self):
         return f"{self.title} - {self.amount} {self.currency} on {self.expense_date}"
 
@@ -183,5 +211,11 @@ class ExpenseSnapshot(models.Model):
         ordering = ["version"]
         unique_together = [("expense", "version")]
 
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ValidationError("ExpenseSnapshots are immutable and cannot be modified once created.")
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Snapshot v{self.version} for '{self.expense.title}'"
+
