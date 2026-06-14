@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Input } from '../components/ui/Input';
 import { Button } from '../components/ui/Button';
@@ -38,7 +38,7 @@ export const Login: React.FC = () => {
       navigate(from, { replace: true });
     } catch (e: any) {
       setErrorMsg(
-        e.response?.status === 401
+        e.response?.status === 401 || e.response?.status === 403
           ? 'Invalid username or password. Please try again.'
           : 'Could not connect to the Spreewise server. Make sure the backend is running.'
       );
@@ -104,6 +104,22 @@ export const Login: React.FC = () => {
             </Button>
           </div>
         </form>
+
+        {/* Sign-up & Join links */}
+        <div className="text-center space-y-2">
+          <p className="text-sm text-slate-500">
+            New to Spreewise?{' '}
+            <Link to="/signup" className="font-semibold text-violet-600 hover:text-violet-700 transition-colors">
+              Create an account
+            </Link>
+          </p>
+          <p className="text-sm text-slate-500">
+            Have an invite code?{' '}
+            <Link to="/join-group" className="font-semibold text-violet-600 hover:text-violet-700 transition-colors">
+              Join a group
+            </Link>
+          </p>
+        </div>
       </div>
     </div>
   );

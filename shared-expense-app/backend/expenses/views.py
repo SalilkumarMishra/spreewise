@@ -29,9 +29,19 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        from groups.models import GroupMembership
+        user = self.request.user
+
+        # Scope to groups the user is actively a member of
+        member_group_ids = GroupMembership.objects.filter(
+            user=user, is_active=True
+        ).values_list('group_id', flat=True)
+
         qs = Expense.objects.select_related(
             "group", "paid_by", "created_by"
         ).prefetch_related("participants__user", "splits__user", "snapshots")
+        qs = qs.filter(group_id__in=member_group_ids)
+
         include_archived = self.request.query_params.get("include_archived", "false").lower() == "true"
         if not include_archived:
             qs = qs.filter(is_archived=False)
@@ -52,6 +62,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             qs = qs.filter(expense_category=category)
 
         return qs
+
 
     def get_serializer_class(self):
         if self.action == "retrieve":

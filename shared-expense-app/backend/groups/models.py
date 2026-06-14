@@ -1,12 +1,28 @@
+import secrets
+import string
 from django.db import models
 from django.conf import settings
 from django.core.exceptions import ValidationError
+
+
+def _generate_invite_code():
+    """Generate a unique invite code in the format SPW-XXXXXXXX (8 alphanumeric chars)."""
+    chars = string.ascii_uppercase + string.digits
+    unique_part = ''.join(secrets.choice(chars) for _ in range(8))
+    return f"SPW-{unique_part}"
+
 
 class Group(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     currency = models.CharField(max_length=10, default="INR")
     is_archived = models.BooleanField(default=False)
+    invite_code = models.CharField(
+        max_length=20,
+        unique=True,
+        blank=True,
+        help_text="Unique invite code for joining this group (e.g. SPW-AB12CD34)"
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
@@ -14,6 +30,16 @@ class Group(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        # Auto-generate invite_code on first save if not set
+        if not self.invite_code:
+            # Ensure uniqueness
+            code = _generate_invite_code()
+            while Group.objects.filter(invite_code=code).exists():
+                code = _generate_invite_code()
+            self.invite_code = code
+        super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
         """Soft delete the group instead of hard deleting."""
@@ -31,6 +57,11 @@ class Group(models.Model):
         ).filter(
             models.Q(left_at__isnull=True) | models.Q(left_at__gte=check_date)
         ).exists()
+
+    def get_user_role(self, user):
+        """Returns the user's current role in this group, or None if not a member."""
+        membership = self.memberships.filter(user=user, is_active=True).first()
+        return membership.role if membership else None
 
     def __str__(self):
         return f"{self.name} ({'Archived' if self.is_archived else 'Active'})"
@@ -61,6 +92,20 @@ class GroupMembership(models.Model):
         choices=ROLE_CHOICES,
         default="member"
     )
+
+    # ── Invite audit trail ────────────────────────────────────────────────
+    joined_via_invite = models.BooleanField(
+        default=False,
+        help_text="True if this membership was created via an invite code"
+    )
+    invite_code_used = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        help_text="The invite code that was used to join, if any"
+    )
+    # ─────────────────────────────────────────────────────────────────────
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

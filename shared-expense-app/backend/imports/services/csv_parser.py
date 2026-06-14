@@ -21,8 +21,14 @@ SETTLEMENT_KEYWORDS = {
 }
 
 def normalize_header(header):
-    """Lowercase and strip all headers for flexible CSV format support."""
-    return header.strip().lower().replace(" ", "_")
+    """Lowercase, strip, and map alternate headers for flexible CSV format support."""
+    normalized = header.strip().lower().replace(" ", "_")
+    mapping = {
+        "paid_by": "payer",
+        "split_with": "participants",
+        "split_details": "splits_data"
+    }
+    return mapping.get(normalized, normalized)
 
 def detect_settlement_from_description(description):
     """Heuristically detect if a row is a settlement disguised as an expense."""
@@ -51,23 +57,36 @@ def parse_amount(amount_str):
         return None, f"Invalid amount: '{amount_str}'"
 
 def parse_participants(participants_str):
-    """Parse a comma-separated list of participant usernames."""
+    """Parse a semicolon or comma-separated list of participant usernames."""
     if not participants_str:
         return []
-    return [p.strip() for p in participants_str.split(",") if p.strip()]
+    cleaned_str = participants_str.replace(";", ",")
+    return [p.strip() for p in cleaned_str.split(",") if p.strip()]
 
 def parse_splits_data(splits_str, split_type):
     """
-    Parse optional splits data in 'user:value,user:value' format.
+    Parse optional splits data in 'user:value,user:value' or 'user value; user value' format.
     Used for percentage, shares, or exact split types.
     """
     if not splits_str or split_type == "equal":
         return [], None
     try:
         splits = []
-        for item in splits_str.split(","):
-            user, value = item.strip().split(":")
-            splits.append({"username": user.strip(), "value": value.strip()})
+        cleaned_str = splits_str.replace(";", ",")
+        for item in cleaned_str.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" in item:
+                user, value = item.split(":", 1)
+            else:
+                parts = item.split(None, 1)
+                if len(parts) == 2:
+                    user, value = parts
+                else:
+                    raise ValueError(f"Invalid split item: {item}")
+            cleaned_value = value.strip().replace("%", "").lstrip("₹$€£")
+            splits.append({"username": user.strip(), "value": cleaned_value})
         return splits, None
     except Exception:
         return [], f"Invalid splits format: '{splits_str}'"
@@ -122,6 +141,8 @@ def parse_csv(file_content):
 
         # Detect split type
         split_type = (row.get("split_type", "equal") or "equal").strip().lower()
+        if split_type == "unequal":
+            split_type = "exact"
 
         # Parse splits data (optional column)
         splits_data, splits_err = parse_splits_data(row.get("splits_data", ""), split_type)

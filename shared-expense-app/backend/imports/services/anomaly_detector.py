@@ -115,9 +115,9 @@ def detect_anomalies(import_job, import_row, parsed, partial_parsed, parse_error
             import_job, import_row,
             anomaly_type="negative_amount",
             category="validation",
-            severity="high",
-            description=f"Amount is negative: {amount}. Financial amounts must be positive.",
-            policy=POLICY_REJECT,
+            severity="medium",
+            description=f"Amount is negative: {amount}. Financial amounts must be positive (e.g. refund).",
+            policy=POLICY_REVIEW_REQUIRED,
         )
         anomalies.append(a)
 
@@ -127,9 +127,9 @@ def detect_anomalies(import_job, import_row, parsed, partial_parsed, parse_error
             import_job, import_row,
             anomaly_type="zero_amount",
             category="validation",
-            severity="medium",
+            severity="high",
             description="Amount is zero. This row likely represents a placeholder or error.",
-            policy=POLICY_REVIEW_REQUIRED,
+            policy=POLICY_REJECT,
         )
         anomalies.append(a)
 
@@ -159,29 +159,37 @@ def detect_anomalies(import_job, import_row, parsed, partial_parsed, parse_error
     # ── E. Unknown User (payer) ──────────────────────────────────────────
     payer_username = p.get("payer", "")
     payer_user = None
-    if payer_username:
+    resolved_user_id = p.get("resolved_user_id")
+    if resolved_user_id:
         try:
-            payer_user = User.objects.get(username=payer_username)
+            payer_user = User.objects.get(id=resolved_user_id)
         except User.DoesNotExist:
+            pass
+
+    if not payer_user:
+        if payer_username:
+            try:
+                payer_user = User.objects.get(username=payer_username)
+            except User.DoesNotExist:
+                a = _create_anomaly(
+                    import_job, import_row,
+                    anomaly_type="unknown_user",
+                    category="unknown_user",
+                    severity="medium",
+                    description=f"Payer '{payer_username}' does not exist in the system.",
+                    policy=POLICY_REVIEW_REQUIRED,
+                )
+                anomalies.append(a)
+        else:
             a = _create_anomaly(
                 import_job, import_row,
-                anomaly_type="unknown_user",
-                category="unknown_user",
-                severity="critical",
-                description=f"Payer '{payer_username}' does not exist in the system.",
-                policy=POLICY_REJECT,
+                anomaly_type="missing_payer",
+                category="validation",
+                severity="high",
+                description="Payer field is empty. Cannot process row without a payer.",
+                policy=POLICY_REVIEW_REQUIRED,
             )
             anomalies.append(a)
-    else:
-        a = _create_anomaly(
-            import_job, import_row,
-            anomaly_type="missing_payer",
-            category="validation",
-            severity="critical",
-            description="Payer field is empty. Cannot process row without a payer.",
-            policy=POLICY_REJECT,
-        )
-        anomalies.append(a)
 
     # ── E. Unknown User (participants) ───────────────────────────────────
     unknown_participants = []
@@ -193,9 +201,9 @@ def detect_anomalies(import_job, import_row, parsed, partial_parsed, parse_error
             import_job, import_row,
             anomaly_type="unknown_participant",
             category="unknown_user",
-            severity="critical",
+            severity="high",
             description=f"Unknown participants: {', '.join(unknown_participants)}",
-            policy=POLICY_REJECT,
+            policy=POLICY_REVIEW_REQUIRED,
         )
         anomalies.append(a)
 
@@ -305,5 +313,54 @@ def detect_anomalies(import_job, import_row, parsed, partial_parsed, parse_error
             policy=POLICY_REJECT,
         )
         anomalies.append(a)
+    elif split_type == "percentage" and splits_data:
+        try:
+            total_pct = sum(Decimal(s["value"]) for s in splits_data)
+            if abs(total_pct - Decimal("100")) > Decimal("0.01"):
+                a = _create_anomaly(
+                    import_job, import_row,
+                    anomaly_type="split_validation_failure",
+                    category="split",
+                    severity="critical",
+                    description=f"Invalid percentage split: total percentages sum to {total_pct}% instead of 100%.",
+                    policy=POLICY_REJECT,
+                )
+                anomalies.append(a)
+        except Exception:
+            pass
+    elif split_type == "exact" and splits_data and amount is not None:
+        try:
+            total_exact = sum(Decimal(s["value"]) for s in splits_data)
+            if abs(total_exact - amount) > Decimal("0.01"):
+                a = _create_anomaly(
+                    import_job, import_row,
+                    anomaly_type="split_validation_failure",
+                    category="split",
+                    severity="high",
+                    description=f"Invalid exact split: splits sum to {total_exact} instead of the total amount {amount}.",
+                    policy=POLICY_REJECT,
+                )
+                anomalies.append(a)
+        except Exception:
+            pass
+
+    # ── M. Date Ambiguity ────────────────────────────────────────────────
+    raw_date = import_row.raw_data.get("date", "") if import_row and import_row.raw_data else ""
+    if raw_date:
+        import re
+        match = re.search(r'\b(\d{1,2})[/-](\d{1,2})[/-]\d{4}\b', raw_date)
+        if match:
+            val1 = int(match.group(1))
+            val2 = int(match.group(2))
+            if 1 <= val1 <= 12 and 1 <= val2 <= 12 and val1 != val2:
+                a = _create_anomaly(
+                    import_job, import_row,
+                    anomaly_type="date_ambiguity",
+                    category="date",
+                    severity="high",
+                    description=f"Date '{raw_date}' is ambiguous (could be {val1} month / {val2} day or vice versa).",
+                    policy=POLICY_REVIEW_REQUIRED,
+                )
+                anomalies.append(a)
 
     return anomalies

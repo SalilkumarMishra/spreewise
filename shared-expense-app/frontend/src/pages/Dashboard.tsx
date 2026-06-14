@@ -5,10 +5,15 @@ import { useQuery } from '@tanstack/react-query';
 import { getGroupBalances, getUserExplanation } from '../api/balances';
 import { listExpenses } from '../api/expenses';
 import { getGroup } from '../api/groups';
+import { getDashboard } from '../api/dashboard';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
-import { ArrowUpRight, ArrowDownRight, Wallet, Users, AlertCircle } from 'lucide-react';
+import {
+  ArrowUpRight, ArrowDownRight, Wallet, Users, AlertCircle,
+  TrendingDown, TrendingUp, Scale, Hash, FileWarning
+} from 'lucide-react';
 import { ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
+
 
 export const Dashboard: React.FC = () => {
   const { activeGroupId } = useOutletContext<{ activeGroupId: number | null }>();
@@ -23,6 +28,13 @@ export const Dashboard: React.FC = () => {
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
+
+  // Fetch personal dashboard summary (cross-group overview)
+  const { data: dashboardData } = useQuery({
+    queryKey: ['dashboard'],
+    queryFn: getDashboard,
+    enabled: true,
+  });
 
   // Fetch active group metadata
   const { data: group } = useQuery({
@@ -107,8 +119,79 @@ export const Dashboard: React.FC = () => {
       {/* Title */}
       <div>
         <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Dashboard</h1>
-        <p className="text-sm text-slate-500">Summary of {group?.name || 'Group'}</p>
+        <p className="text-sm text-slate-500">
+          Welcome back, <span className="font-semibold text-violet-600">{user?.full_name || user?.username}</span>
+          {group ? ` · Viewing ${group.name}` : ''}
+        </p>
       </div>
+
+      {/* Personal Overview — cross-group summary */}
+      {dashboardData && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* You Owe */}
+          <div className="bg-red-50 border border-red-100 rounded-xl p-5 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold text-red-500 uppercase tracking-wide">You Owe</p>
+              <p className="text-2xl font-bold text-red-700 mt-1">
+                ₹{dashboardData.net_balance.you_owe.toFixed(2)}
+              </p>
+              <p className="text-[11px] text-red-400 mt-1">across {dashboardData.group_count} group{dashboardData.group_count !== 1 ? 's' : ''}</p>
+            </div>
+            <div className="bg-red-100 p-3 rounded-xl">
+              <TrendingDown className="h-6 w-6 text-red-500" />
+            </div>
+          </div>
+
+          {/* You Are Owed */}
+          <div className="bg-green-50 border border-green-100 rounded-xl p-5 flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold text-green-600 uppercase tracking-wide">You Are Owed</p>
+              <p className="text-2xl font-bold text-green-700 mt-1">
+                ₹{dashboardData.net_balance.you_are_owed.toFixed(2)}
+              </p>
+              <p className="text-[11px] text-green-400 mt-1">across your active groups</p>
+            </div>
+            <div className="bg-green-100 p-3 rounded-xl">
+              <TrendingUp className="h-6 w-6 text-green-500" />
+            </div>
+          </div>
+
+          {/* Net Balance */}
+          <div className={`border rounded-xl p-5 flex items-center justify-between ${
+            dashboardData.net_balance.net >= 0
+              ? 'bg-violet-50 border-violet-100'
+              : 'bg-orange-50 border-orange-100'
+          }`}>
+            <div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Net Balance</p>
+              <p className={`text-2xl font-bold mt-1 ${
+                dashboardData.net_balance.net >= 0 ? 'text-violet-700' : 'text-orange-700'
+              }`}>
+                {dashboardData.net_balance.net >= 0 ? '+' : ''}₹{dashboardData.net_balance.net.toFixed(2)}
+              </p>
+              <p className="text-[11px] text-slate-400 mt-1">overall position</p>
+            </div>
+            <div className={`p-3 rounded-xl ${
+              dashboardData.net_balance.net >= 0 ? 'bg-violet-100' : 'bg-orange-100'
+            }`}>
+              <Scale className={`h-6 w-6 ${
+                dashboardData.net_balance.net >= 0 ? 'text-violet-500' : 'text-orange-500'
+              }`} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pending import reviews alert */}
+      {dashboardData && dashboardData.pending_import_reviews > 0 && (
+        <div className="flex items-center space-x-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <FileWarning className="h-5 w-5 text-amber-500 shrink-0" />
+          <p className="text-sm text-amber-700 font-medium">
+            {dashboardData.pending_import_reviews} import job{dashboardData.pending_import_reviews !== 1 ? 's' : ''} awaiting your review.
+          </p>
+          <Link to="/imports" className="ml-auto text-sm font-semibold text-amber-600 hover:underline">Review now →</Link>
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">

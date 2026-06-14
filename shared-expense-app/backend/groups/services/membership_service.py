@@ -1,7 +1,7 @@
 from django.core.exceptions import ValidationError
 from groups.models import GroupMembership, Group
 
-def add_member(group, user, joined_at, role="member"):
+def add_member(group, user, joined_at, role="member", joined_via_invite=False, invite_code_used=None):
     """
     Business logic for adding a user to a group.
     Ensures:
@@ -41,12 +41,15 @@ def add_member(group, user, joined_at, role="member"):
         user=user,
         joined_at=joined_at,
         role=role,
-        is_active=True
+        is_active=True,
+        joined_via_invite=joined_via_invite,
+        invite_code_used=invite_code_used,
     )
     # Triggers clean() validation (including joined_at <= left_at)
     membership.full_clean()
     membership.save()
     return membership
+
 
 
 def leave_membership(membership, left_at):

@@ -20,10 +20,19 @@ class SettlementViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        from groups.models import GroupMembership
+        user = self.request.user
+
+        # Scope to groups the user is actively a member of
+        member_group_ids = GroupMembership.objects.filter(
+            user=user, is_active=True
+        ).values_list('group_id', flat=True)
+
         qs = Settlement.objects.select_related(
             "group", "payer", "receiver", "created_by"
         ).prefetch_related("snapshots")
-        
+        qs = qs.filter(group_id__in=member_group_ids)
+
         include_archived = self.request.query_params.get("include_archived", "false").lower() == "true"
         if not include_archived:
             qs = qs.filter(is_archived=False)
@@ -42,6 +51,7 @@ class SettlementViewSet(viewsets.ModelViewSet):
             qs = qs.filter(source=source)
 
         return qs
+
 
     def get_serializer_class(self):
         if self.action == "retrieve":

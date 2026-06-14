@@ -32,7 +32,11 @@ class ImportJobViewSet(viewsets.ViewSet):
         Expected: multipart/form-data with fields:
           - file: CSV file
           - group_id: integer
+        Requires: owner or admin role in the group.
         """
+        from groups.models import GroupMembership
+        from rest_framework.exceptions import PermissionDenied
+
         file_obj = request.FILES.get("file")
         group_id = request.data.get("group_id")
 
@@ -42,6 +46,15 @@ class ImportJobViewSet(viewsets.ViewSet):
             return Response({"error": "group_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         group = get_object_or_404(Group, id=group_id)
+
+        # Only group owners and admins can upload CSVs
+        membership = GroupMembership.objects.filter(
+            group=group, user=request.user, is_active=True
+        ).first()
+        if not membership:
+            raise PermissionDenied("You are not a member of this group.")
+        if membership.role not in ["owner", "admin"]:
+            raise PermissionDenied("Only group owners and admins can upload CSV files.")
 
         import_job = ImportJob.objects.create(
             group=group,
@@ -54,6 +67,7 @@ class ImportJobViewSet(viewsets.ViewSet):
         process_import_job(import_job, csv_content, group, request.user)
 
         return Response(ImportJobSerializer(import_job).data, status=status.HTTP_201_CREATED)
+
 
     @action(detail=True, methods=["get"], url_path="anomalies")
     def anomalies(self, request, pk=None):

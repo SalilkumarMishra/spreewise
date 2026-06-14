@@ -19,6 +19,7 @@ from imports.services.csv_parser import parse_csv
 from imports.services.anomaly_detector import (
     detect_anomalies, POLICY_REJECT, POLICY_REVIEW_REQUIRED
 )
+from imports.services.user_resolver import resolve_user
 from imports.services.report_service import generate_report
 from expenses.services.expense_service import create_expense
 from settlements.services.settlement_service import create_settlement
@@ -52,11 +53,56 @@ def process_import_job(import_job, csv_content, group, importer_user):
     any_review_required = False
 
     for row_data in rows:
+        # Perform user identity resolution
+        p_parsed = row_data.get("partial_parsed") or {}
+        
+        # Payer Resolution
+        payer_name = p_parsed.get("payer", "")
+        resolved_payer, payer_strategy = resolve_user(payer_name)
+        if resolved_payer:
+            p_parsed["resolved_user_id"] = resolved_payer.id
+            p_parsed["resolved_payer_id"] = resolved_payer.id
+            p_parsed["resolution_strategy"] = payer_strategy
+            p_parsed["payer"] = resolved_payer.username
+        else:
+            p_parsed["resolved_user_id"] = None
+            p_parsed["resolved_payer_id"] = None
+            p_parsed["resolution_strategy"] = "failed"
+
+        # Participants Resolution
+        participant_names = p_parsed.get("participants", [])
+        resolved_participant_ids = []
+        participant_strategies = []
+        resolved_participants = []
+        for name in participant_names:
+            resolved_p, p_strategy = resolve_user(name)
+            if resolved_p:
+                resolved_participant_ids.append(resolved_p.id)
+                participant_strategies.append(p_strategy)
+                resolved_participants.append(resolved_p.username)
+            else:
+                participant_strategies.append("failed")
+                resolved_participants.append(name)
+        
+        p_parsed["resolved_participant_ids"] = resolved_participant_ids
+        p_parsed["participant_resolution_strategies"] = participant_strategies
+        p_parsed["participants"] = resolved_participants
+
+        # Sync back to full parsed row data (for downstream processing)
+        if row_data.get("parsed"):
+            row_data["parsed"]["payer"] = p_parsed["payer"]
+            row_data["parsed"]["participants"] = p_parsed["participants"]
+            row_data["parsed"]["resolved_user_id"] = p_parsed["resolved_user_id"]
+            row_data["parsed"]["resolved_payer_id"] = p_parsed["resolved_payer_id"]
+            row_data["parsed"]["resolution_strategy"] = p_parsed["resolution_strategy"]
+            row_data["parsed"]["resolved_participant_ids"] = p_parsed["resolved_participant_ids"]
+            row_data["parsed"]["participant_resolution_strategies"] = p_parsed["participant_resolution_strategies"]
+
         import_row = ImportRow.objects.create(
             import_job=import_job,
             row_number=row_data["row_number"],
             raw_data=row_data["raw_data"],
-            parsed_data=row_data.get("partial_parsed"),
+            parsed_data=p_parsed,
             processing_status="pending",
         )
 
@@ -64,7 +110,7 @@ def process_import_job(import_job, csv_content, group, importer_user):
             import_job=import_job,
             import_row=import_row,
             parsed=row_data["parsed"],
-            partial_parsed=row_data.get("partial_parsed"),
+            partial_parsed=p_parsed,
             parse_errors=row_data["parse_errors"],
             group=group,
         )

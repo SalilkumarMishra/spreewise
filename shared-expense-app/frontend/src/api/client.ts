@@ -10,32 +10,82 @@ export const apiClient = axios.create({
   },
 });
 
-// Axios request interceptor to append Basic Auth token dynamically
+// ── Request interceptor: attach Bearer token ─────────────────────────────
 apiClient.interceptors.request.use(
   (config) => {
-    const token = sessionStorage.getItem('spreewise_token');
+    const token = sessionStorage.getItem('spreewise_access_token');
     if (token && config.headers) {
-      config.headers['Authorization'] = `Basic ${token}`;
+      config.headers['Authorization'] = `Bearer ${token}`;
     }
     return config;
   },
-  (error) => {
-    return Promise.reject(error);
-  }
+  (error) => Promise.reject(error)
 );
 
-// Axios response interceptor to handle 401s and redirect to login if needed
+// ── Response interceptor: auto-refresh on 401 ───────────────────────────
+let isRefreshing = false;
+let failedQueue: Array<{ resolve: (v: string) => void; reject: (e: unknown) => void }> = [];
+
+function processQueue(error: unknown, token: string | null) {
+  failedQueue.forEach((prom) => {
+    if (error) prom.reject(error);
+    else prom.resolve(token!);
+  });
+  failedQueue = [];
+}
+
 apiClient.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response && error.response.status === 401) {
-      sessionStorage.removeItem('spreewise_token');
-      sessionStorage.removeItem('spreewise_user');
-      // If we are not on the login page, trigger a reload to push the router to login
-      if (!window.location.pathname.includes('/login')) {
-        window.location.href = '/login';
+  async (error) => {
+    const originalRequest = error.config;
+
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        // Queue the request until refresh completes
+        return new Promise<string>((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        })
+          .then((token) => {
+            originalRequest.headers['Authorization'] = `Bearer ${token}`;
+            return apiClient(originalRequest);
+          })
+          .catch((err) => Promise.reject(err));
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      const refreshToken = sessionStorage.getItem('spreewise_refresh_token');
+      if (!refreshToken) {
+        // No refresh token — force logout
+        sessionStorage.clear();
+        if (!window.location.pathname.includes('/login')) {
+          window.location.href = '/login';
+        }
+        return Promise.reject(error);
+      }
+
+      try {
+        const res = await axios.post(`${API_BASE_URL}/api/auth/refresh/`, {
+          refresh: refreshToken,
+        });
+        const newAccessToken: string = res.data.access;
+        sessionStorage.setItem('spreewise_access_token', newAccessToken);
+        processQueue(null, newAccessToken);
+        originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+        return apiClient(originalRequest);
+      } catch (refreshError) {
+        processQueue(refreshError, null);
+        sessionStorage.clear();
+        if (!window.location.pathname.includes('/login')) {
+          window.location.href = '/login';
+        }
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
       }
     }
+
     return Promise.reject(error);
   }
 );
