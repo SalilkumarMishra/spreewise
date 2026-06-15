@@ -8,10 +8,7 @@ import { getGroup } from '../api/groups';
 import { getDashboard } from '../api/dashboard';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
-import {
-  ArrowUpRight, ArrowDownRight, Wallet, Users, AlertCircle,
-  TrendingDown, TrendingUp, Scale, Hash, FileWarning
-} from 'lucide-react';
+import { ArrowUpRight, ArrowDownRight, Wallet, Users, AlertCircle, TrendingDown, TrendingUp, Scale, FileWarning } from 'lucide-react';
 import { ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip } from 'recharts';
 
 
