@@ -31,9 +31,16 @@ SECRET_KEY = 'django-insecure-mia05so!-ha8&y*bed(ixx4vdjjf#1rkhprwx+!8_shx3q1w=y
 # SECURITY WARNING: don't run with debug turned on in production!
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
+# Secure cookies in production
+CSRF_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SECURE = not DEBUG
 
 # Hosts allowed to serve the app; include Railway domain via env
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '').split(',') if os.getenv('ALLOWED_HOSTS') else []
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv('ALLOWED_HOSTS', '').split(',')
+    if host.strip()
+] if not DEBUG else ['localhost', '127.0.0.1']
 
 
 # Application definition
@@ -71,6 +78,8 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+# Ensure Django respects the HTTPS scheme behind Railway's reverse proxy
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 ROOT_URLCONF = 'config.urls'
 
@@ -131,6 +140,9 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
 ]
+# CSRF trusted origins – read from environment variable
+csrf_origins = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+CSRF_TRUSTED_ORIGINS = [origin.strip() for origin in csrf_origins.split(',') if origin.strip()]
 
 
 # Internationalization
@@ -153,13 +165,17 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # CORS Settings
-# CORS configuration: allow origins defined via environment variable or allow all in development
 cors_origins = os.getenv('CORS_ALLOWED_ORIGINS')
 if cors_origins:
     CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(',')]
     CORS_ALLOW_ALL_ORIGINS = False
+elif DEBUG:
+    # Local development – allow frontend running on localhost:5173
+    CORS_ALLOWED_ORIGINS = ['http://localhost:5173']
+    CORS_ALLOW_ALL_ORIGINS = False
 else:
-    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = []
+    CORS_ALLOW_ALL_ORIGINS = False
 
 # Django REST Framework Settings
 REST_FRAMEWORK = {
