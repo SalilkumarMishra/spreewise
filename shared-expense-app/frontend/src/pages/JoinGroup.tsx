@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Button } from '../components/ui/Button';
-import { Input } from '../components/ui/Input';
+
 import { joinGroupByInviteCode } from '../api/groups';
 import { ArrowRightLeft, Hash, CheckCircle, AlertTriangle, ArrowRight } from 'lucide-react';
 
