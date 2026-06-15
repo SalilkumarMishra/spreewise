@@ -164,6 +164,13 @@ STATIC_URL = '/static/'
 # Directory where collectstatic will place static files
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
+# WhiteNoise storage for compressed manifest static files (Django 6+)
+STORAGES = {
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
 # CORS Settings
 cors_origins = os.getenv('CORS_ALLOWED_ORIGINS')
 if cors_origins:
