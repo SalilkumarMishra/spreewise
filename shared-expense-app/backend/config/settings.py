@@ -36,11 +36,11 @@ CSRF_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_SECURE = not DEBUG
 
 # Hosts allowed to serve the app; include Railway domain via env
-ALLOWED_HOSTS = [
-    host.strip()
-    for host in os.getenv('ALLOWED_HOSTS', '').split(',')
-    if host.strip()
-] if not DEBUG else ['localhost', '127.0.0.1']
+if not DEBUG:
+    env_hosts = [host.strip() for host in os.getenv('ALLOWED_HOSTS', '').split(',') if host.strip()]
+    ALLOWED_HOSTS = env_hosts if env_hosts else ['*']  # Fallback to allow all in production when not set
+else:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 
 # Application definition
