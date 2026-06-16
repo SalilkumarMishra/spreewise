@@ -109,7 +109,10 @@ import dj_database_url
 # Database configuration: use DATABASE_URL if provided (Railway), otherwise fallback to individual env vars
 DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
+    # Enforce SSL mode required by Railway's managed PostgreSQL
     DATABASES = {'default': dj_database_url.parse(DATABASE_URL, conn_max_age=600)}
+    # Ensure SSL options are set (fallback in case the URL does not include sslmode)
+    DATABASES['default'].setdefault('OPTIONS', {}).setdefault('sslmode', 'require')
 else:
     DATABASES = {
         'default': {
